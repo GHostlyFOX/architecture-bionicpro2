@@ -11,6 +11,19 @@ services:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
       - "5433:5432"
+
+  # Used for CRM and Telemetry simulation too (in different databases/schemas ideally,
+  # but we might just use keycloak_db for simplicity or add another postgres)
+  # Let's add a dedicated source DB to avoid confusion.
+  source_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: source_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5434:5432"
+
   keycloak:
     image: quay.io/keycloak/keycloak:21.1
     environment:
@@ -68,5 +81,28 @@ services:
       KEYCLOAK_CLIENT_ID: reports-frontend
       KEYCLOAK_CLIENT_SECRET: "secret"
       FRONTEND_URL: http://localhost:3000
+      REPORTS_SERVICE_URL: http://reports-service:8000
     depends_on:
       - keycloak
+
+  clickhouse:
+    image: yandex/clickhouse-server
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  reports-service:
+    build:
+      context: ./reports-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 9000
+    depends_on:
+      - clickhouse

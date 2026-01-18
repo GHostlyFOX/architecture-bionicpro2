@@ -1,6 +1,7 @@
 import os
 import secrets
 import uuid
+import requests
 from typing import Optional
 
 from fastapi import FastAPI, Request, Response, HTTPException, Depends
@@ -17,6 +18,7 @@ KEYCLOAK_CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "reports-frontend")
 KEYCLOAK_CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "secret")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 KEYCLOAK_EXTERNAL_URL = "http://localhost:8080"
+REPORTS_SERVICE_URL = os.getenv("REPORTS_SERVICE_URL", "http://reports-service:8000")
 
 # CORS
 app.add_middleware(
@@ -139,8 +141,38 @@ def logout(request: Request, response: Response):
 
 @app.get("/reports")
 def get_reports(request: Request):
+    """
+    Proxy request to Reports Service.
+    Enforces security: Uses the authenticated user's ID from session.
+    """
     session_id = request.cookies.get("session_id")
     if not session_id or session_id not in sessions:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    # In a real app, use the access token to call the ML backend
-    return {"data": "Secure Report Data"}
+
+    session_data = sessions[session_id]
+
+    # Get User Info to find the ID (sub or preferred_username)
+    # We might have cached it, or we fetch it. user_info endpoint fetches it.
+    access_token = session_data["access_token"]
+    try:
+        userinfo = keycloak_openid.userinfo(access_token)
+        user_id = userinfo.get("preferred_username") # Or "sub" depending on what we use in DB
+        # For our mock seed, we used usernames like "user1", so use preferred_username.
+
+        if not user_id:
+             raise HTTPException(status_code=400, detail="User ID not found in token")
+
+        # Call Reports Service
+        # We pass user_id in URL. We could also pass a service token if we had inter-service auth.
+        resp = requests.get(f"{REPORTS_SERVICE_URL}/reports/{user_id}")
+
+        if resp.status_code == 200:
+            return resp.json()
+        elif resp.status_code == 404:
+            return {"message": "Report not found"}
+        else:
+            raise HTTPException(status_code=resp.status_code, detail="Error fetching report")
+
+    except Exception as e:
+        print(f"Error in proxy: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
