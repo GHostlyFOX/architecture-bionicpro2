@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 # Configuration
-SOURCE_CONN_ID = "postgres_default" # Pointing to source_db
+SOURCE_CONN_ID = "postgres_default"
 CLICKHOUSE_HOST = "clickhouse"
 
 default_args = {
@@ -20,32 +20,15 @@ default_args = {
 }
 
 dag = DAG(
-    'bionicpro_etl_daily_report',
+    'bionicpro_etl_daily_telemetry',
     default_args=default_args,
-    description='ETL pipeline for BionicPRO reports',
-    schedule_interval='0 1 * * *', # Daily at 1 AM
+    description='ETL pipeline for BionicPRO telemetry (CRM via CDC)',
+    schedule_interval='0 1 * * *',
     catchup=False
 )
 
-def extract_crm_data(**kwargs):
-    pg_hook = PostgresHook(postgres_conn_id=SOURCE_CONN_ID)
-    sql = "SELECT id, name, email, model FROM crm_users"
-    df = pg_hook.get_pandas_df(sql)
-    return df.to_dict('records')
-
 def extract_telemetry_data(**kwargs):
-    # In reality, this would filter by execution_date (yesterday)
     pg_hook = PostgresHook(postgres_conn_id=SOURCE_CONN_ID)
-    execution_date = kwargs['ds']
-    sql = f"""
-        SELECT user_id, timestamp, signal_strength, battery_level, action
-        FROM telemetry_logs
-        WHERE date(timestamp) = '{execution_date}'
-    """
-    # For demo purposes, we might pull all or a specific range if empty
-    # sql = "SELECT ..."
-    # Let's assume we pull everything for the 'demo' run or stick to daily logic.
-    # To ensure data for the reviewer, let's relax the date filter or assume the seeder populated "yesterday"
     sql = """
         SELECT user_id, date(timestamp) as log_date, avg(signal_strength) as avg_signal,
                min(battery_level) as min_battery, count(action) as total_actions
@@ -55,50 +38,23 @@ def extract_telemetry_data(**kwargs):
     df = pg_hook.get_pandas_df(sql)
     return df.to_dict('records')
 
-def transform_data(**kwargs):
+def transform_telemetry(**kwargs):
     ti = kwargs['ti']
-    crm_data = ti.xcom_pull(task_ids='extract_crm')
     telemetry_data = ti.xcom_pull(task_ids='extract_telemetry')
 
-    if not crm_data or not telemetry_data:
-        print("No data to transform")
+    if not telemetry_data:
         return []
 
-    df_crm = pd.DataFrame(crm_data)
-    df_telemetry = pd.DataFrame(telemetry_data)
+    df = pd.DataFrame(telemetry_data)
 
-    # Merge
-    # crm: id, name...
-    # telemetry: user_id, log_date...
+    # Just format types if needed, no CRM merge here
+    df['log_date'] = pd.to_datetime(df['log_date']).dt.date
 
-    df_merged = pd.merge(df_telemetry, df_crm, left_on='user_id', right_on='id', how='left')
-
-    # Rename/Select columns for ClickHouse
-    # Target table: user_daily_reports
-    # Columns: report_date Date, user_id String, user_name String, prosthesis_model String,
-    #          avg_signal Float32, min_battery Int32, total_actions Int32
-
-    df_final = df_merged[[
-        'log_date', 'user_id', 'name', 'model', 'avg_signal', 'min_battery', 'total_actions'
-    ]].copy()
-
-    df_final.rename(columns={
-        'log_date': 'report_date',
-        'name': 'user_name',
-        'model': 'prosthesis_model'
-    }, inplace=True)
-
-    # Fill NaNs if any user in telemetry wasn't in CRM (shouldn't happen ideally)
-    df_final.fillna({'user_name': 'Unknown', 'prosthesis_model': 'Unknown'}, inplace=True)
-
-    # Convert dates
-    df_final['report_date'] = pd.to_datetime(df_final['report_date']).dt.date
-
-    return df_final.to_dict('records')
+    return df.to_dict('records')
 
 def load_to_clickhouse(**kwargs):
     ti = kwargs['ti']
-    data = ti.xcom_pull(task_ids='transform_data')
+    data = ti.xcom_pull(task_ids='transform_telemetry')
 
     if not data:
         print("No data to load")
@@ -106,49 +62,40 @@ def load_to_clickhouse(**kwargs):
 
     client = Client(CLICKHOUSE_HOST)
 
-    # Create DB and Table if not exists
+    # Ensure raw table exists (should be created by init script, but safe to check)
     client.execute('CREATE DATABASE IF NOT EXISTS bionicpro')
     client.execute('''
-        CREATE TABLE IF NOT EXISTS bionicpro.user_daily_reports (
-            report_date Date,
+        CREATE TABLE IF NOT EXISTS bionicpro.telemetry_raw (
             user_id String,
-            user_name String,
-            prosthesis_model String,
+            log_date Date,
             avg_signal Float32,
             min_battery Int32,
             total_actions Int32
         ) ENGINE = MergeTree()
-        ORDER BY (user_id, report_date)
+        ORDER BY (user_id, log_date)
     ''')
 
-    # Insert
-    client.execute('INSERT INTO bionicpro.user_daily_reports VALUES', data)
+    # Insert raw telemetry
+    client.execute('INSERT INTO bionicpro.telemetry_raw VALUES', data)
 
 t1 = PythonOperator(
-    task_id='extract_crm',
-    python_callable=extract_crm_data,
+    task_id='extract_telemetry',
+    python_callable=extract_telemetry_data,
     dag=dag,
 )
 
 t2 = PythonOperator(
-    task_id='extract_telemetry',
-    python_callable=extract_telemetry_data,
+    task_id='transform_telemetry',
+    python_callable=transform_telemetry,
     provide_context=True,
     dag=dag,
 )
 
 t3 = PythonOperator(
-    task_id='transform_data',
-    python_callable=transform_data,
-    provide_context=True,
-    dag=dag,
-)
-
-t4 = PythonOperator(
     task_id='load_to_clickhouse',
     python_callable=load_to_clickhouse,
     provide_context=True,
     dag=dag,
 )
 
-[t1, t2] >> t3 >> t4
+t1 >> t2 >> t3
