@@ -1,51 +1,36 @@
 import React, { useState } from 'react';
-import { useKeycloak } from '@react-keycloak/web';
 
 const ReportPage: React.FC = () => {
-  const { keycloak, initialized } = useKeycloak();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const downloadReport = async () => {
-    if (!keycloak?.token) {
-      setError('Not authenticated');
-      return;
-    }
-
     try {
       setLoading(true);
       setError(null);
 
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/reports`, {
-        headers: {
-          'Authorization': `Bearer ${keycloak.token}`
-        }
+      const response = await fetch(`http://localhost:8000/reports`, {
+        credentials: 'include'
       });
 
-      
+      if (!response.ok) {
+        if (response.status === 401) {
+            window.location.reload();
+            return;
+        }
+        throw new Error('Failed to fetch report');
+      }
+
+      const data = await response.json();
+      console.log(data);
+      alert('Report downloaded: ' + JSON.stringify(data));
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoading(false);
     }
   };
-
-  if (!initialized) {
-    return <div>Loading...</div>;
-  }
-
-  if (!keycloak.authenticated) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
-        <button
-          onClick={() => keycloak.login()}
-          className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-        >
-          Login
-        </button>
-      </div>
-    );
-  }
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100">
