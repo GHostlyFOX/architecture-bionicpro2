@@ -14,6 +14,10 @@ curl -i -X POST -H "Accept:application/json" -H "Content-Type:application/json" 
     "database.server.name": "crmserver",
     "table.include.list": "public.crm_users",
     "plugin.name": "pgoutput",
-    "topic.prefix": "crmserver"
+    "topic.prefix": "crmserver",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false"
   }
 }'
